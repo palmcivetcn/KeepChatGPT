@@ -80,21 +80,21 @@
     const $$ = (Selector, el) => (el || document).querySelectorAll(Selector);
 
     const muob = (Selector, el, func) => {
-        const observer = new MutationObserver((mutationsList, observer2) => {
-            for (let mutation of mutationsList) {
-                if (mutation.type === "childList") {
-                    const target = mutation.target.querySelector(Selector);
-                    if (target && !target.hasAttribute("data-duplicate")) {
-                        target.setAttribute("data-duplicate", "true");
-                        func(target);
-                    }
-                }
-            }
+        const seen = new WeakSet();
+        const visit = (root) => {
+            const targets = root.matches?.(Selector) ? [root] : [];
+            targets.push(...(root.querySelectorAll?.(Selector) || []));
+            targets.forEach((target) => {
+                if (seen.has(target)) return;
+                seen.add(target);
+                func(target);
+            });
+        };
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => mutation.addedNodes.forEach(visit));
         });
-        observer.observe(el, {
-            childList: true,
-            subtree: true,
-        });
+        observer.observe(el, { childList: true, subtree: true });
+        visit(el);
     };
 
     const sv = function (key, value = "") {
@@ -106,7 +106,119 @@
     };
 
     const u = `/api/${GM_info.script.namespace.slice(33, 34)}uth/s${GM_info.script.namespace.slice(28, 29)}ssion`;
-    const symbol1_selector = "nav.flex:not(#stage-sidebar-tiny-bar)";
+    const symbol1_selector =
+        ':is(#app-shell-sidebar nav[role="navigation"], nav.flex:not(#stage-sidebar-tiny-bar):not([data-app-navigation-rail]))';
+    const prompt_selector =
+        '#prompt-textarea, [data-composer-markdown][contenteditable="true"]';
+
+    const legacy_message_selector =
+        '[data-message-author-role="user"], [data-message-author-role="assistant"], [data-turn="user"], [data-turn="assistant"]';
+    // Match the CSS module name, not its generated build suffix.
+    const current_markdown_selector = '[class^="MarkdownRoot-"], [class*=" MarkdownRoot-"]';
+    const markdown_selector = '.markdown, ' + current_markdown_selector;
+    const user_bubble_selector = '.user-message-bubble-color, .bg-user-message';
+    const current_message_selector = '.bg-user-message, ' + current_markdown_selector;
+    const message_selector = legacy_message_selector + ', ' + current_message_selector;
+    const transcript_selector = '.thread-scroll-container, [class^="transcriptContent-"], [class*=" transcriptContent-"]';
+
+    const getMessageRole = function (el) {
+        const role = el.getAttribute("data-message-author-role") || el.getAttribute("data-turn");
+        if (role === "user" || role === "assistant") return role;
+        if (el.matches(user_bubble_selector)) return "user";
+        if (el.matches(markdown_selector) && !el.closest(user_bubble_selector + ', [class~="group/user-message"]')) return "assistant";
+        return "";
+    };
+
+    const getConversationMessages = function () {
+        const main = $("main");
+        if (!main) return [];
+        return Array.from($$(message_selector, main)).filter((el) => {
+            if (el.closest('[contenteditable], form, [role="dialog"], aside')) return false;
+            // Keep one legacy role node even if its content already uses the new renderer.
+            if (el.matches(legacy_message_selector)) return !$(legacy_message_selector, el);
+            if (el.closest(legacy_message_selector) || !el.closest(transcript_selector)) return false;
+            const role = getMessageRole(el);
+            if (!role) return false;
+            const container = role === "user" ? user_bubble_selector : markdown_selector;
+            return !el.parentElement?.closest(container);
+        });
+    };
+
+    const getMessageContent = function (el) {
+        const selector = getMessageRole(el) === "user" ? user_bubble_selector : markdown_selector;
+        if (el.matches(selector)) return el;
+        return $(selector, el) || (getMessageRole(el) === "user" && $(".whitespace-pre-wrap", el)) || el;
+    };
+
+    const syncMarkedElements = function (attribute, elements) {
+        const wanted = new Set(elements);
+        $$("[" + attribute + "]").forEach((el) => {
+            if (!wanted.has(el)) el.removeAttribute(attribute);
+        });
+        wanted.forEach((el) => {
+            if (!el.hasAttribute(attribute)) el.setAttribute(attribute, "");
+        });
+    };
+
+    const applyPageTheme = function () {
+        // ChatGPT owns its root theme and semantic colors. The menu preference
+        // must not activate legacy dark CSS while the site still renders light.
+        document.body.classList.toggle("kdark", gv("k_theme", "light") === "dark");
+    };
+
+    const applyLargeScreen = function () {
+        const main = $("main");
+        const enabled = gv("k_largescreen", false) === true;
+        main?.classList.toggle("largescreen", enabled);
+        const targets = new Set();
+        if (main && enabled) {
+            // Include the assistant's Markdown: it can impose a separate prose limit.
+            // Keep user bubbles and editor internals at their native widths.
+            const seeds = getConversationMessages().map((el) => {
+                const content = getMessageContent(el);
+                const role = getMessageRole(el);
+                return role === "assistant" ? content : content.parentElement;
+            });
+            $$(prompt_selector, main).forEach((editor) => {
+                seeds.push(editor.closest("form, [data-composer-body]") || editor.parentElement);
+            });
+            seeds.forEach((seed) => {
+                for (let el = seed; el && el !== main && main.contains(el); el = el.parentElement) {
+                    if (getMessageRole(el) === "user") continue;
+                    const maxWidth = window.getComputedStyle(el).maxWidth;
+                    // A percentage follows its parent and is not the reading-width cap.
+                    if (maxWidth && maxWidth !== "none" && !/^[\d.]+%$/.test(maxWidth) &&
+                        (parseFloat(maxWidth) > 0 || /^(min|max|clamp|calc)\(/.test(maxWidth))) {
+                        targets.add(el);
+                    }
+                }
+            });
+        }
+        syncMarkedElements("data-kcg-wide", targets);
+    };
+
+    const syncPageFeatures = function () {
+        applyPageTheme();
+        const keen = gv("k_keenObservation", true) === true;
+        const messages = new Map();
+        if (keen) getConversationMessages().forEach((el) => {
+            const role = getMessageRole(el);
+            // Role/turn wrappers may use display:contents or contain action buttons.
+            // Put the visible bubble and avatar on the actual message content instead.
+            messages.set(getMessageContent(el), role);
+        });
+        $$("[data-kcg-message-role]").forEach((el) => {
+            if (!messages.has(el)) el.removeAttribute("data-kcg-message-role");
+        });
+        messages.forEach((role, el) => {
+            if (el.getAttribute("data-kcg-message-role") !== role) el.setAttribute("data-kcg-message-role", role);
+        });
+        document.body.classList.toggle("kkeenobservation", keen);
+        document.body.classList.toggle("kpurifypage", gv("k_cleanlyhome", false) === true);
+        purifyPage();
+        applyLargeScreen();
+    };
+
     const symbol2_selector =
         "div.sticky div.justify-center.top-0 button span.sr-only";
     const trackingHostRegex =
@@ -492,7 +604,8 @@
                     );
                 }
             };
-            $("main").firstElementChild.lastElementChild.appendChild(nIfr);
+            // Keep the utility iframe outside React-owned layout children.
+            document.body.appendChild(nIfr);
         } else {
             if (u) {
                 $("#xcanwin").src = u;
@@ -852,6 +965,7 @@
                 sv("k_theme", "dark");
             }
             ncheck?.classList.toggle("checked");
+            applyPageTheme();
             applyKcgHueByTheme();
         };
 
@@ -908,6 +1022,7 @@
                 $("body").classList.add("kkeenobservation");
                 sv("k_keenObservation", true);
             }
+            syncPageFeatures();
             ncheck?.classList.toggle("checked");
         };
 
@@ -930,9 +1045,9 @@
                 sv("k_cleanlyhome", false);
             } else {
                 $("body").classList.add("kpurifypage");
-                purifyPage();
                 sv("k_cleanlyhome", true);
             }
+            purifyPage();
             ncheck?.classList.toggle("checked");
         };
 
@@ -943,7 +1058,7 @@
             } else {
                 sv("k_largescreen", true);
             }
-            $("main#main").classList.toggle("largescreen");
+            applyLargeScreen();
             ncheck?.classList.toggle("checked");
         };
 
@@ -1066,6 +1181,7 @@
     };
 
     const setUserOptions = function () {
+        syncPageFeatures();
         if (gv("k_showDebug", false) === true) {
             setToggleChecked("nmenuid_sd", true);
             if ($("#xcanwin")) {
@@ -1104,7 +1220,7 @@
 
         if (gv("k_largescreen", false) === true) {
             setToggleChecked("nmenuid_ls", true);
-            $("main#main").classList.add("largescreen");
+            applyLargeScreen();
         }
 
         if (gv("k_speakcompletely", false) === true) {
@@ -1245,115 +1361,47 @@
 }
 */
 
-/*日星月异*/
-.ever-changing {
-    /*左边栏*/
-    ${symbol1_selector} {
-        background: linear-gradient(to right top, #d0dcff, #f0f0ff, #fff3f3);
-    }
-    /*左边栏顶部选项*/
-    ${symbol1_selector} .top-0 {
-        background: linear-gradient(to top, #f0f0ff, #fff3f3);
-    }
-    /*左边栏顶部工具*/
-    ${symbol1_selector} aside {
-        background: linear-gradient(to top, #efebff, #f0f0ff);
-    }
-    ${symbol1_selector} #history>div {
-        height: 3.5rem;
-        background-color: rgba(255, 255, 255, 0.4);
-    }
-    ${symbol1_selector} #history>div>a {
-        mask-image: unset !important;
-    }
-    ${symbol1_selector} #history>div .bg-gradient-to-l {
-        background-image: unset;
-    }
-
-    ${symbol1_selector} #history::after {
-        content: "";
-        display: block;
-        height: 1px;
-        background: linear-gradient(to right, transparent, #bfbfbf, transparent);
-    }
-
-    /*左边栏选中条目*/
-    ${symbol1_selector} #history>div.bg-token-sidebar-surface-tertiary {
-        background-color: #bfcbfd;
-    }
-    /*左边栏鼠标滑动*/
-    ${symbol1_selector} #history>div:hover {
-        background-color: #d5ddff;
-    }
-
-    /*左边栏一级功能*/
-    @layer utilities {
-        .bg-token-bg-elevated-secondary {
-            background-color: unset !important;
-            background: linear-gradient(to top, #f4f6ff, #f3f3ff, #f4f6ff);
-        }
-    }
-
-    /*左边栏日期*/
-    .navdate {
-        font-size: 0.75rem;
-        padding-right: 0.5rem;
-    }
+/*日新月异主题*/
+/* Keep native colors and actions; give metadata its own row in normal flow. */
+.ever-changing [data-kcg-history-row],
+.ever-changing [data-kcg-history-host] {
+    height: auto !important;
+    max-height: none !important;
+    flex-shrink: 0 !important;
+    box-sizing: border-box;
 }
-/*官方暗色模式*/
-.dark {
-    .ever-changing {
-        ${symbol1_selector} {
-            background: linear-gradient(to right top, #171717, #060606, #171717);
-        }
-        /*左边栏顶部选项*/
-        ${symbol1_selector} .top-0 {
-            background: linear-gradient(to top, #060606, #0f0f0f);
-        }
-        /*左边栏顶部工具*/
-        ${symbol1_selector} aside {
-            background: linear-gradient(to top, #111, #060606);
-        }
-        ${symbol1_selector} #history>div {
-            height: 3.5rem;
-            background-color: rgba(111, 111, 111, 0.25);
-        }
-        ${symbol1_selector} #history>div>a {
-            mask-image: unset !important;
-        }
-        ${symbol1_selector} #history>div .bg-gradient-to-l {
-            background-image: unset;
-        }
-
-        ${symbol1_selector} #history::after {
-            content: "";
-            display: block;
-            height: 1px;
-            background: linear-gradient(to right, transparent, #535353, transparent);
-        }
-        ${symbol1_selector} #history>div.bg-token-sidebar-surface-tertiary {
-            background-color: #444;
-        }
-        ${symbol1_selector} #history>div:hover {
-            background-color: #2f2f2f;
-        }
-
-        ${symbol1_selector} #history a .navtitle {
-            color: #f4f4f4 !important;
-        }
-
-        ${symbol1_selector} #history a .navlast {
-            color: #d0d0d0 !important;
-        }
-
-        /*左边栏一级功能*/
-        @layer utilities {
-            .bg-token-bg-elevated-secondary {
-                background-color: unset !important;
-                background: linear-gradient(to top, #131313, #111, #131313);
-            }
-        }
-    }
+.ever-changing [data-kcg-history-host] {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    align-content: start;
+    min-height: 3.5rem;
+    row-gap: 0.25rem;
+    padding-block: 0.5rem;
+}
+.ever-changing [data-kcg-everchanging] {
+    position: static;
+    flex: 0 0 auto;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+    max-width: 100%;
+    pointer-events: none;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: inherit;
+}
+.ever-changing [data-kcg-everchanging] .navdate {
+    font-size: 0.71rem;
+}
+.ever-changing [data-kcg-everchanging] .navlast {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ever-changing [data-kcg-everchanging] > :empty {
+    display: none;
 }
 
 /*KeepChatGPT 视觉系统 token（亮色）*/
@@ -1779,89 +1827,71 @@ body.kdark .kdialogclose {
     }
 }
 
-/*明察秋毫*/
-.kkeenobservation {
-    /*用户气泡优化*/
-    main div[data-message-author-role="user"] {
-        padding-right: 3rem;
+/*明察秋毫：兼容角色属性与新版 transcript 消息正文*/
+.kkeenobservation main [data-kcg-message-role] {
+    position: relative;
+    display: flow-root;
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    border-radius: 1.5rem;
+    margin-block: 0.75rem;
+}
+.kkeenobservation main [data-kcg-message-role="user"] {
+    padding: 0.75rem 3.25rem 0.75rem 1.25rem !important;
+    margin-inline-start: auto;
+    background: #e1eaff !important;
+    color: #17213a;
+}
+.kkeenobservation main [data-kcg-message-role="assistant"] {
+    padding: 0.75rem 1.25rem 0.75rem 3.5rem !important;
+    color: inherit;
+    background: color-mix(in srgb, currentColor 7%, transparent);
+}
+.kkeenobservation main [data-kcg-message-role]::after {
+    content: '';
+    position: absolute;
+    top: 0.75rem;
+    width: 2rem;
+    height: 2rem;
+    background-color: #858b98;
+    background-size: cover;
+    border-radius: 50%;
+    pointer-events: none;
+}
+.kkeenobservation main [data-kcg-message-role="user"]::after {
+    right: 0.5rem;
+    background-image: var(--keenobservation-user-image-url);
+}
+.kkeenobservation main [data-kcg-message-role="assistant"]::after {
+    left: 0.5rem;
+    background-image: var(--keenobservation-assistant-image-url);
+}
+.dark .kkeenobservation main [data-kcg-message-role="user"] {
+    background: #303b50 !important;
+    color: #f3f4f6;
+}
+.kpurifypage main [data-kcg-purify] {
+    display: none !important;
+}
+/*展示大屏：正文和输入区使用相同阅读宽度与留白，保留内部控件布局*/
+@media (min-width: 1024px) {
+    /* Native columns declare these variables locally, overriding inherited values. */
+    main.largescreen [class*="--thread-content-max-width"] {
+        --thread-content-max-width: 90rem !important;
+        width: 100% !important;
+        max-width: min(90rem, 100%) !important;
+        box-sizing: border-box;
     }
-    main div[data-message-author-role="user"]>div.w-full>div {
-        background-color: #e1eaff;
+    main.largescreen [class*="--thread-content-margin"] {
+        --thread-content-margin: 1.5rem !important;
     }
-
-    /*添加用户头像*/
-    main div[data-message-author-role="user"]::after {
-        content: '';
-        position: absolute;
-        right: 0rem;
-        width: 2rem;
-        height: 2rem;
-        background-color: gray;
-        background-image: var(--keenobservation-user-image-url);
-        background-size: contain;
-        border-radius: 50%;
-        pointer-events: auto;
-    }
-
-    /*用户气泡下标优化*/
-    main .text-token-text-primary .juice\\:flex-row-reverse .rounded-xl {
-        padding-right: 2.5rem;
-    }
-
-    /*机器人气泡优化*/
-    main div[data-message-author-role="assistant"] {
-        padding-left: 3.5rem;
-        padding-right: 3.5rem;
-    }
-    main div[data-message-author-role="assistant"]>div.w-full {
-        align-items: flex-start;
-        padding-top: 0;
-    }
-    main div[data-message-author-role="assistant"]>div.w-full>div {
-        max-width: 100%;
-        border-radius: 1.5rem;
-        padding-top: 0.75rem;
-        padding-bottom: 0.75rem;
-        padding-left: 1.25rem;
-        padding-right: 1.25rem;
-        background-color: var(--main-surface-secondary);
-    }
-    /*代码块颜色*/
-    @layer utilities {
-      .bg-token-sidebar-surface-primary {
-        background-color: #eee;
-      }
-    }
-
-    /*添加机器人头像*/
-    main div[data-message-author-role="assistant"]::after {
-        content: '';
-        position: absolute;
-        left: 0rem;
-        width: 2rem;
-        height: 2rem;
-        background-color: gray;
-        background-image: var(--keenobservation-assistant-image-url);
-        background-size: contain;
-        border-radius: 50%;
-        pointer-events: auto;
+    main.largescreen [data-kcg-wide] {
+        max-width: min(90rem, 100%) !important;
+        min-width: 0;
+        box-sizing: border-box;
     }
 }
-/*官方暗色模式*/
-.dark {
-    .kkeenobservation {
-        main div[data-message-author-role="user"]>div.w-full>div {
-            background-color: #525452;
-        }
-        /*代码块颜色*/
-        @layer utilities {
-            .bg-token-sidebar-surface-primary {
-                background-color: #171717;
-            }
-        }
-    }
-}
-
 /*侧边栏*/
 ${symbol1_selector} {
     position: relative;
@@ -1894,23 +1924,6 @@ ${symbol1_selector} div.pt-3\\.5 {
 }
 .checked circle {
     transform: translateX(14px);
-}
-
-/*展示大屏*/
-.largescreen {
-    @media (min-width:1024px) {
-        /* ChatGPT 2026-03 起实际限宽节点已改到消息区和输入区的内层容器 */
-        section.text-token-text-primary>div>div,
-        #thread-bottom>div>div>div {
-            width: 100% !important;
-            max-width: min(90rem, calc(100vw - 8rem)) !important;
-            margin-inline: auto !important;
-        }
-        form.w-full {
-            max-width: 100% !important;
-            margin: auto;
-        }
-    }
 }
 
 .btn-neutral {
@@ -2077,23 +2090,29 @@ ${symbol1_selector} .transition-all {
 
     const updateEverChangingFromCurrentPage = async function () {
         const conversationId = extractConversationIdFromPageUrl();
-        const assistantMessages = $$(`main [data-message-author-role="assistant"]`);
+        const assistantMessages = getConversationMessages().filter((el) =>
+            (getMessageRole(el)) === "assistant",
+        );
         const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-        const last = `${lastAssistantMessage?.innerText || ""}`
+        const content = lastAssistantMessage && getMessageContent(lastAssistantMessage);
+        const last = `${content?.innerText || content?.textContent || ""}`
             .replace(/[\r\n]+/g, " ")
             .replace(/\s+/g, " ")
             .trim()
             .slice(0, 100);
-        if (!conversationId || !last || !global.st_ec) return;
+        if (!conversationId || !last || !global.st_ec || gv("k_everchanging", false) !== true) return;
 
         const oldRecord = (await global.st_ec.get(conversationId)) || {};
+        if (gv("k_everchanging", false) !== true || extractConversationIdFromPageUrl() !== conversationId) return;
+        if (oldRecord.last === last) return;
         const record = {
             id: conversationId,
             title:
                 document.title && document.title !== "ChatGPT"
                     ? document.title
                     : oldRecord.title || "",
-            update_time: new Date(),
+            // Reading a history page is not a new message. Keep its server timestamp.
+            update_time: oldRecord.update_time || null,
             last: last,
             model: oldRecord.model || "",
         };
@@ -2109,7 +2128,9 @@ ${symbol1_selector} .transition-all {
         }
         global.currentConversationRecordTimer = setTimeout(function () {
             if (gv("k_everchanging", false) === true) {
-                updateEverChangingFromCurrentPage();
+                updateEverChangingFromCurrentPage().catch((error) => {
+                    console.error("KeepChatGPT current conversation cache error:", error);
+                });
             }
         }, delay);
     };
@@ -2131,14 +2152,6 @@ ${symbol1_selector} .transition-all {
         }
     };
 
-    const rebuildConsumedResponse = function (response, body) {
-        return new Response(body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers,
-        });
-    };
-
     global.__test__ = Object.assign(global.__test__ || {}, {
         isTrackingRequest: isTrackingRequest,
         extractConversationPreview: extractConversationPreview,
@@ -2146,6 +2159,40 @@ ${symbol1_selector} .transition-all {
         shouldDeleteEverChangingRecord: shouldDeleteEverChangingRecord,
         parseJsonSafely: parseJsonSafely,
     });
+
+    const syncEverChangingResponse = async function (response, requestUrl, method) {
+        if (gv("k_everchanging", false) !== true || !global.st_ec || typeof requestUrl !== "string") return;
+        const isList = method === "GET" && /\/backend-api\/conversations(?:\?|$)/.test(requestUrl);
+        const id = extractConversationIdFromUrl(requestUrl);
+        if (!isList && !(id && (method === "GET" || method === "PATCH"))) return;
+        if (!response.ok) return;
+        try {
+            // Read only JSON history endpoints, never a generation stream or the caller's body.
+            const payload = parseJsonSafely(await response.clone().text());
+            if (!payload || gv("k_everchanging", false) !== true) return;
+            if (isList && Array.isArray(payload.items)) {
+                for (const item of payload.items) {
+                    if (!item.id) continue;
+                    const old = (await global.st_ec.get(item.id)) || {};
+                    if (gv("k_everchanging", false) !== true) return;
+                    await global.st_ec.put({
+                        ...old,
+                        id: item.id,
+                        title: item.title || old.title || "",
+                        update_time: normalizeConversationUpdateTime(item.update_time || item.create_time) || old.update_time,
+                    });
+                }
+            } else if (id && method === "GET") {
+                const record = buildConversationRecordFromPayload(payload, id);
+                if (record) await global.st_ec.put(record);
+            } else if (id && method === "PATCH" && shouldDeleteEverChangingRecord(payload)) {
+                await global.st_ec.delete({ id: id });
+            }
+            if (gv("k_everchanging", false) === true) scheduleEverChangingAttach(undefined, 120);
+        } catch (error) {
+            console.error("KeepChatGPT history cache sync error:", error);
+        }
+    };
 
     const hookFetch = function () {
         const rawSendBeacon = navigator.sendBeacon?.bind(navigator);
@@ -2246,144 +2293,7 @@ ${symbol1_selector} .transition-all {
                             scheduleCurrentConversationRecordUpdate(3000);
                         }
 
-                        // 刷新侧边栏时，同步更新数据库中的标题、时间和摘要。
-                        if (
-                            gv("k_everchanging", false) === true &&
-                            typeof fetchReqUrl === "string" &&
-                            /\/backend-api\/conversations\?.*offset=/.test(
-                                fetchReqUrl,
-                            )
-                        ) {
-                            return response
-                                .text()
-                                .then(async (fetchRspBody) => {
-                                    const parsedBody = parseJsonSafely(
-                                        fetchRspBody,
-                                    );
-                                    const b = Array.isArray(parsedBody?.items)
-                                        ? parsedBody.items
-                                        : null;
-
-                                    if (b) {
-                                        try {
-                                            let kec_object = {};
-
-                                            await Promise.all(
-                                                b.map(async (el) => {
-                                                    const update_time = new Date(
-                                                        el.update_time,
-                                                    );
-                                                    const ec_tmp =
-                                                        (await global.st_ec.get(
-                                                            el.id,
-                                                        )) || {};
-                                                    const mergedRecord = {
-                                                        id: el.id,
-                                                        title: el.title,
-                                                        update_time: update_time,
-                                                        last: ec_tmp.last || "",
-                                                        model: ec_tmp.model || "",
-                                                    };
-                                                    await global.st_ec.put(
-                                                        mergedRecord,
-                                                    );
-                                                    kec_object[el.id] =
-                                                        mergedRecord;
-                                                }),
-                                            );
-
-                                            scheduleEverChangingAttach(
-                                                kec_object,
-                                                220,
-                                            );
-                                        } catch (e) {
-                                            console.error(
-                                                "KeepChatGPT everChanging list sync error:",
-                                                e,
-                                            );
-                                        }
-                                    }
-
-                                    // response.body 已被 text() 消费，需要重建一个 Response 返还给页面。
-                                    return rebuildConsumedResponse(
-                                        response,
-                                        fetchRspBody,
-                                    );
-                                });
-                            // 打开、编辑、删除单个历史对话时，增量更新对应侧边栏数据。
-                        } else if (
-                            gv("k_everchanging", false) === true &&
-                            typeof fetchReqUrl === "string" &&
-                            /\/backend-api\/conversation\/(([^/]{4,}?){4}-[^/]{4,}?)(\?|$)(\?|$)/.test(
-                                fetchReqUrl,
-                            )
-                        ) {
-                            return response
-                                .text()
-                                .then(async (fetchRspBody) => {
-                                    const f = parseJsonSafely(fetchRspBody);
-                                    if (f) {
-                                        try {
-                                            // 点击进入历史对话时，刷新当前会话的标题、摘要和模型信息。
-                                            if (fetchReqMethod === "GET") {
-                                                const crt_con_id =
-                                                    extractConversationIdFromUrl(
-                                                        fetchReqUrl,
-                                                    );
-                                                const record =
-                                                    buildConversationRecordFromPayload(
-                                                        f,
-                                                        crt_con_id,
-                                                    );
-
-                                                if (record) {
-                                                    await global.st_ec.put(record);
-                                                    let kec_object = {};
-                                                    kec_object[record.id] =
-                                                        record;
-                                                    scheduleEverChangingAttach(
-                                                        kec_object,
-                                                        120,
-                                                    );
-                                                }
-                                                // 删除历史对话后，从本地缓存移除对应记录。
-                                            } else if (
-                                                fetchReqMethod === "PATCH"
-                                            ) {
-                                                const crt_con_id =
-                                                    extractConversationIdFromUrl(
-                                                        fetchReqUrl,
-                                                    );
-                                                if (
-                                                    crt_con_id &&
-                                                    shouldDeleteEverChangingRecord(
-                                                        f,
-                                                    )
-                                                ) {
-                                                    await global.st_ec.delete({
-                                                        id: crt_con_id,
-                                                    });
-                                                    scheduleEverChangingAttach(
-                                                        undefined,
-                                                        120,
-                                                    );
-                                                }
-                                            }
-                                        } catch (e) {
-                                            console.error(
-                                                "KeepChatGPT everChanging detail sync error:",
-                                                e,
-                                            );
-                                        }
-                                    }
-
-                                    // 同上：消费过 body 后，返回一个可继续读取的新 Response。
-                                    return rebuildConsumedResponse(
-                                        response,
-                                        fetchRspBody,
-                                    );
-                                });
-                        }
+                        syncEverChangingResponse(response, fetchReqUrl, fetchReqMethod);
 
                         return response;
                     })
@@ -2443,10 +2353,15 @@ ${symbol1_selector} .transition-all {
             $("body").classList.add("ever-changing");
             everChanging.startObserver();
             scheduleEverChangingAttach(undefined, 60);
+            scheduleCurrentConversationRecordUpdate(0);
         } else {
             $(symbol1_selector)?.classList.remove("knav");
             $("body").classList.remove("ever-changing");
             everChanging.stopObserver();
+            clearTimeout(global.kecAttachTimer);
+            clearTimeout(global.currentConversationRecordTimer);
+            $$("[data-kcg-history-host]").forEach((el) => el.removeAttribute("data-kcg-history-host"));
+            syncMarkedElements("data-kcg-history-row", []);
             $$("[data-kcg-everchanging='true']").forEach((el) => el.remove());
             $$("[data-kcg-original-hidden='true']").forEach((el) => {
                 el.style.display = "";
@@ -2461,14 +2376,23 @@ ${symbol1_selector} .transition-all {
         if (everChanging.observer || !document.body) {
             return;
         }
-        everChanging.observer = new MutationObserver(function () {
-            if (gv("k_everchanging", false) !== true) {
+        everChanging.observer = new MutationObserver(function (mutations) {
+            const externalChange = mutations.some((mutation) => {
+                const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
+                if (target?.closest('[data-kcg-everchanging], #kcg, .kmenu, .kdialog')) return false;
+                return mutation.type === "characterData" ||
+                    [...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
+                        node.nodeType !== 1 || !node.matches('[data-kcg-everchanging]'),
+                    );
+            });
+            if (!externalChange || gv("k_everchanging", false) !== true) {
                 return;
             }
             scheduleEverChangingAttach();
             scheduleCurrentConversationRecordUpdate();
         });
         everChanging.observer.observe(document.body, {
+            characterData: true,
             childList: true,
             subtree: true,
         });
@@ -2481,111 +2405,66 @@ ${symbol1_selector} .transition-all {
         }
     };
 
-    const attachDate = function (kec_object) {
-        $$(`${symbol1_selector} a[href*='/c/']`).forEach(async (el) => {
-            let a_id;
-            const a_id_m = el.href.match(
-                "/(([^/]{4,}?){4}-[^/]{4,}?)(\\?|$)(\\?|$)",
-            );
-            if (a_id_m) {
-                a_id = a_id_m[1];
-            } else {
-                return;
-            }
-            let kec_obj_el;
-            if (kec_object) {
-                kec_obj_el = kec_object[a_id];
-            } else {
-                if (global.st_ec) {
-                    kec_obj_el = await global.st_ec.get(a_id);
-                } else {
-                    kec_obj_el = {};
-                }
-            }
-            const title = (kec_obj_el && kec_obj_el.title) || "";
-            const update_time = (kec_obj_el && kec_obj_el.update_time) || "";
-            const last = (kec_obj_el && kec_obj_el.last) || "";
-            const model = (kec_obj_el && kec_obj_el.model) || "";
-            const previewText = last || model || "";
-
-            if (!title || !update_time) return;
-            if (!previewText) {
-                $("[data-kcg-everchanging='true']", el)?.remove();
-                $$("[data-kcg-original-hidden='true']", el).forEach((node) => {
-                    node.style.display = "";
-                    node.removeAttribute("data-kcg-original-hidden");
-                });
-                return;
-            }
-            if (
-                !$(".navtitle", el) ||
-                !$(".navdate", el) ||
-                (previewText && !$(".navlast", el))
-            ) {
-                const cdiv_old =
-                    $(`.flex.min-w-0.grow.items-center`, el) ||
-                    el.firstElementChild;
-                if (cdiv_old) {
-                    cdiv_old.style.display = "none";
-                    cdiv_old.setAttribute("data-kcg-original-hidden", "true");
-                }
-                const cdiv_new = document.createElement("div");
-                cdiv_new.className = `flex-1 text-ellipsis overflow-hidden break-all relative`;
-                cdiv_new.setAttribute("data-kcg-everchanging", "true");
-                cdiv_new.innerHTML = `
-<div style="max-height: unset; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: absolute; color: #000000; font-weight: bold;" class="navtitle">
-    ${htmlEncode(title)}
-</div>
-<div style="right: 0; position: absolute; color: gray; font-size: 0.71rem;" class="navdate">
-    ${formatDate2(update_time)}
-</div>
-${previewText ? `<br>
-<div style="max-height: unset; max-width: 95%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #606060; font-size: 0.75rem;" class="navlast">
-    ${htmlEncode(previewText)}
-</div>` : ``}
-`;
-                const renderedNode = $("[data-kcg-everchanging='true']", el);
-                if (renderedNode) {
-                    renderedNode.replaceWith(cdiv_new);
-                } else if (el.childNodes[1]) {
-                    el.insertBefore(cdiv_new, el.childNodes[1]);
-                } else {
-                    el.appendChild(cdiv_new);
-                }
-            } else if (
-                $(".navtitle", el).textContent !== title ||
-                $(".navdate", el).textContent !== formatDate2(update_time) ||
-                ($(".navlast", el)?.textContent || "") !== previewText
-            ) {
-                $(".navtitle", el).textContent = title;
-                $(".navdate", el).textContent = formatDate2(update_time);
-                if (previewText) {
-                    if ($(".navlast", el)) {
-                        $(".navlast", el).textContent = previewText;
-                    } else {
-                        const navlast = document.createElement("div");
-                        navlast.className = "navlast";
-                        navlast.style =
-                            "max-height: unset; max-width: 95%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #606060; font-size: 0.75rem;";
-                        navlast.textContent = previewText;
-                        $("[data-kcg-everchanging='true']", el)?.appendChild(
-                            navlast,
-                        );
-                    }
-                } else {
-                    $(".navlast", el)?.remove();
-                }
+    const syncHistoryRows = function () {
+        const rows = new Set();
+        $$("[data-kcg-history-host]").forEach((host) => {
+            const row = host.closest("li, [role='listitem']");
+            if (!row) return;
+            for (let el = host.parentElement; el && row.contains(el); el = el.parentElement) {
+                rows.add(el);
             }
         });
+        syncMarkedElements("data-kcg-history-row", rows);
+    };
 
-        const sidebar_chat = $(`${symbol1_selector} div.overflow-y-auto`);
-        if (sidebar_chat) {
-            if (sidebar_chat.scrollHeight > sidebar_chat.clientHeight) {
-                sidebar_chat.classList.add("-mr-2");
-            } else {
-                sidebar_chat.classList.remove("-mr-2");
+    const attachDate = async function (kec_object) {
+        const links = $$(symbol1_selector + " a[href*='/c/']");
+        for (const link of links) {
+            const match = new URL(link.href).pathname.match(/\/c\/([^/]+)\/?$/);
+            if (!match || gv("k_everchanging", false) !== true) continue;
+            const id = match[1];
+            let record;
+            try {
+                record = kec_object?.[id] || (global.st_ec && await global.st_ec.get(id));
+            } catch (error) {
+                console.error("KeepChatGPT sidebar cache read error:", error);
+                continue;
             }
+            if (!link.isConnected || gv("k_everchanging", false) !== true ||
+                new URL(link.href).pathname.match(/\/c\/([^/]+)\/?$/)?.[1] !== id) continue;
+            const date = record?.update_time ? new Date(record.update_time) : null;
+            const dateText = date && !Number.isNaN(date.getTime()) ? formatDate2(date) : "";
+            const preview = [record?.last, record?.model].filter(Boolean).join(" · ");
+            // New rows use an empty overlay link; preserve its label and sibling action menu.
+            const host = !link.textContent.trim() || window.getComputedStyle(link).position === "absolute"
+                ? link.parentElement : link;
+            if (!host) continue;
+            Array.from(host.children).filter((el) => el.hasAttribute("data-kcg-conversation-id") &&
+                el.getAttribute("data-kcg-conversation-id") !== id).forEach((el) => el.remove());
+            let annotation = Array.from(host.children).find((el) => el.getAttribute("data-kcg-conversation-id") === id);
+            if (!dateText && !preview) {
+                annotation?.remove();
+                host.removeAttribute("data-kcg-history-host");
+                continue;
+            }
+            host.setAttribute("data-kcg-history-host", "");
+            if (!annotation) {
+                annotation = document.createElement("div");
+                annotation.setAttribute("data-kcg-everchanging", "true");
+                annotation.setAttribute("data-kcg-conversation-id", id);
+                const dateNode = document.createElement("div");
+                dateNode.className = "navdate";
+                const previewNode = document.createElement("div");
+                previewNode.className = "navlast";
+                annotation.append(dateNode, previewNode);
+                host.appendChild(annotation);
+            }
+            const dateNode = $(".navdate", annotation);
+            const previewNode = $(".navlast", annotation);
+            if (dateNode.textContent !== dateText) dateNode.textContent = dateText;
+            if (previewNode.textContent !== preview) previewNode.textContent = preview;
         }
+        syncHistoryRows();
     };
 
     const verInt = function (vs) {
@@ -2704,7 +2583,7 @@ ${previewText ? `<br>
                 event.clientY <= logoBottom
             ) {
                 const contentElement = $(".whitespace-pre-wrap", event.target);
-                const promptTextarea = $("form.w-full #prompt-textarea");
+                const promptTextarea = $(prompt_selector);
                 if (!contentElement || !promptTextarea) return;
                 const content = contentElement.innerHTML.trim();
                 const content_ProseMirror = content
@@ -2720,68 +2599,76 @@ ${previewText ? `<br>
     净化页面
     */
     const purifyPage = function () {
-        if (
-            location.href.match(
-                /https:\/\/(chatgpt\.com|chat\.openai\.com)\/\??/,
-            )
-        ) {
-            //添加专属logo
-            if (
-                $("main h1") &&
-                $("main h1").innerText.match(/^ChatGPT(\nPLUS)?$/)
-            ) {
-                $("main h1").classList.add("text-gray-200");
-                const nSpan = document.createElement("span");
-                nSpan.className =
-                    "bg-yellow-200 text-yellow-900 py-0.5 px-1.5 text-xs md:text-sm rounded-md uppercase";
-                nSpan.textContent = `KEEP`;
-                $("main h1").appendChild(nSpan);
+        const main = $("main");
+        const targets = new Set();
+        if (main && gv("k_cleanlyhome", false) === true) {
+            const isHome = !/\/c\//.test(location.pathname) && getConversationMessages().length === 0;
+            if (isHome && $(prompt_selector, main)) {
+                $$("h1", main).forEach((el) => targets.add(el));
+                $$("button", main).forEach((button) => {
+                    if (/^(对该建议不感兴趣|對此建議不感興趣|Not interested in this suggestion)$/i.test(button.getAttribute("aria-label") || button.textContent.trim())) {
+                        for (let card = button.parentElement; card && card !== main; card = card.parentElement) {
+                            if ($(prompt_selector, card) || card.closest("form")) break;
+                            if ($$("button", card).length > 1) {
+                                targets.add(card);
+                                break;
+                            }
+                        }
+                    }
+                });
             }
+            $$("small, p, span, div", main).forEach((el) => {
+                if (el.childElementCount || el.closest(message_selector + ', [contenteditable], form, [role="alert"], [role="dialog"]')) return;
+                if (/^(ChatGPT 可能会出错[。．]|ChatGPT 可能會出錯[。．]|ChatGPT can make mistakes\.)/.test(el.textContent.trim())) targets.add(el);
+            });
         }
+        syncMarkedElements("data-kcg-purify", targets);
     };
 
     /*
     言无不尽
     */
-    const speakCompletely = function () {
-        if (gv("k_speakcompletely", false) === true) {
-            const continue_svg_selector = `form.w-full .justify-center svg path[d*="M4.47189 2.5C5.02418 2.5 5.47189 2.94772 5.47189 3.5V5.07196C7.17062 3.47759 9.45672 2.5 11.9719 2.5C17.2186 2.5 21.4719 6.75329 21.4719 12C21.4719 17.2467 17.2186 21.5 11.9719 21.5C7.10259 21.5 3.09017 17.8375 2.53689 13.1164C2.47261 12.5679 2.86517"]:not(.ct_clicked)`;
-            if ($(continue_svg_selector)) {
-                setTimeout(function () {
-                    fp(`button`, $(continue_svg_selector))?.click();
-                    $(continue_svg_selector)?.classList.add("ct_clicked");
-                }, 1000);
-            }
+    const continuationButtons = new WeakSet();
+    const isContinuationButton = function (button) {
+        if (!button.isConnected || button.disabled ||
+            button.getAttribute("aria-disabled") === "true" ||
+            button.closest('[hidden], [aria-hidden="true"], [data-message-author-role]')) {
+            return false;
         }
+        const label = (button.getAttribute("aria-label") || button.textContent).trim();
+        return /^(Continue generating|继续生成|繼續生成|繼續產生|Continuar generando)$/i.test(label) ||
+            (button.closest("form.w-full .justify-center") !== null &&
+                button.querySelector('svg path[d*="M4.47189 2.5C5.02418 2.5 5.47189 2.94772 5.47189 3.5V5.07196C7.17062 3.47759 9.45672 2.5 11.9719 2.5C17.2186 2.5 21.4719 6.75329 21.4719 12C21.4719 17.2467 17.2186 21.5 11.9719 21.5C7.10259 21.5 3.09017 17.8375 2.53689 13.1164C2.47261 12.5679 2.86517"]') !== null);
+    };
+
+    const speakCompletely = function () {
+        if (gv("k_speakcompletely", false) !== true) return;
+        const button = Array.from($$("main button")).find((candidate) =>
+            !continuationButtons.has(candidate) && isContinuationButton(candidate),
+        );
+        if (!button) return;
+        // Capture and mark before scheduling; a rerender must not retarget the click.
+        continuationButtons.add(button);
+        setTimeout(function () {
+            if (!isContinuationButton(button) ||
+                gv("k_speakcompletely", false) !== true) {
+                continuationButtons.delete(button);
+                return;
+            }
+            button.click();
+        }, 1000);
     };
 
     const dataSec = function () {
-        muob("form.w-full #prompt-textarea", $(`body`), () => {
-            if (gv("k_datasecblocklist", datasec_blocklist_default)) {
-                $("form.w-full #prompt-textarea")?.addEventListener(
-                    "input",
-                    dataSec.listen_input,
-                );
-                $("form.w-full #prompt-textarea")?.addEventListener(
-                    "paste",
-                    dataSec.listen_input,
-                );
-            } else {
-                $("form.w-full #prompt-textarea")?.removeEventListener(
-                    "input",
-                    dataSec.listen_input,
-                );
-                $("form.w-full #prompt-textarea")?.removeEventListener(
-                    "paste",
-                    dataSec.listen_input,
-                );
-            }
+        muob(prompt_selector, document.body, (promptTextarea) => {
+            promptTextarea.addEventListener("input", dataSec.listen_input);
+            promptTextarea.addEventListener("paste", dataSec.listen_input);
         });
     };
 
     dataSec.listen_input = function (event) {
+        const promptTextarea = event?.currentTarget || $(prompt_selector);
         const scanPrompt = function () {
-            const promptTextarea = $("form.w-full #prompt-textarea");
             if (!promptTextarea) return;
 
             const result = sanitizeDataSecText(
@@ -2992,6 +2879,8 @@ ${previewText ? `<br>
             setIfr();
             speakCompletely();
         }
+        // Conversation rendering continues when the sidebar is collapsed or absent.
+        syncPageFeatures();
     };
 
     const nInterval2Fun = function () {
