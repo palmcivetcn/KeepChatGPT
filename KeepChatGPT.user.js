@@ -191,9 +191,22 @@
         syncMarkedElements("data-kcg-wide", targets);
     };
 
+    const syncUserAvatar = function () {
+        const avatar = $('#app-shell-sidebar .sidebar-item button[aria-haspopup="menu"] img.rounded-full');
+        if (!avatar) return;
+        const imageUrl = avatar.currentSrc || avatar.src;
+        if (!imageUrl || imageUrl === user_info.image_url) return;
+        user_info.image_url = imageUrl;
+        document.documentElement.style.setProperty(
+            "--keenobservation-user-image-url",
+            `url(${JSON.stringify(imageUrl)})`,
+        );
+    };
+
     const syncPageFeatures = function () {
         applyPageTheme();
         const keen = gv("k_keenObservation", true) === true;
+        if (keen) syncUserAvatar();
         const messages = new Map();
         if (keen) getConversationMessages().forEach((el) => {
             messages.set(el, getMessageRole(el));
@@ -1331,10 +1344,6 @@
         });
 
         document.documentElement.style.setProperty(
-            "--keenobservation-user-image-url",
-            `url('${user_info.image_url}')`,
-        ); //更新明察秋毫用户头像
-        document.documentElement.style.setProperty(
             "--keenobservation-assistant-image-url",
             `url('https://cdn.oaistatic.com/assets/favicon-180x180-od45eci6.webp')`,
         ); //更新明察秋毫机器人头像
@@ -1810,37 +1819,41 @@ body.kdark .kdialogclose {
     box-sizing: border-box;
     min-width: 0;
     max-width: 100%;
-    border-radius: 1.5rem;
+    min-height: 3.25rem;
+    border-radius: 1.25rem;
     margin-block: 0.75rem;
 }
 .kkeenobservation main [data-kcg-message-role="user"] {
-    padding: 0.75rem 3.25rem 0.75rem 1.25rem !important;
+    padding: 0.875rem 3.375rem 0.875rem 1.25rem !important;
     margin-inline-start: auto;
     background: #e1eaff !important;
     color: #17213a;
 }
 .kkeenobservation main [data-kcg-message-role="assistant"] {
-    padding: 0.75rem 1.25rem 0.75rem 3.5rem !important;
+    padding: 0.875rem 1.25rem 0.875rem 3.375rem !important;
     color: inherit;
     background: color-mix(in srgb, currentColor 7%, transparent);
 }
 .kkeenobservation main [data-kcg-message-role]::after {
     content: '';
     position: absolute;
-    top: 0.75rem;
-    width: 2rem;
-    height: 2rem;
+    /* Center on the first line: padding + half a line - half the avatar. */
+    top: 0.5lh;
+    width: 1.75rem;
+    height: 1.75rem;
     background-color: #858b98;
     background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
     border-radius: 50%;
     pointer-events: none;
 }
 .kkeenobservation main [data-kcg-message-role="user"]::after {
-    right: 0.5rem;
-    background-image: var(--keenobservation-user-image-url);
+    right: 0.875rem;
+    background-image: var(--keenobservation-user-image-url, none);
 }
 .kkeenobservation main [data-kcg-message-role="assistant"]::after {
-    left: 0.5rem;
+    left: 0.875rem;
     background-image: var(--keenobservation-assistant-image-url);
 }
 [data-theme="dark"] .kkeenobservation main [data-kcg-message-role="user"] {
@@ -2830,10 +2843,6 @@ ${symbol1_selector} .transition-all {
             const match = s.textContent?.match(/\\"email\\",\\"(.*?)\\"/);
             if (match) {
                 user_info.email = match[1];
-            }
-            const match2 = s.textContent?.match(/\\"picture\\",\\"(.*?)\\"/);
-            if (match2) {
-                user_info.image_url = match2[1]?.replaceAll("\\u0026", "&");
             }
         }
         global.st_ec = new IndexedDB(
