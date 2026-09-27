@@ -106,24 +106,16 @@
     };
 
     const u = `/api/${GM_info.script.namespace.slice(33, 34)}uth/s${GM_info.script.namespace.slice(28, 29)}ssion`;
-    const symbol1_selector =
-        ':is(#app-shell-sidebar nav[role="navigation"], nav.flex:not(#stage-sidebar-tiny-bar):not([data-app-navigation-rail]))';
-    const prompt_selector =
-        '#prompt-textarea, [data-composer-markdown][contenteditable="true"]';
+    const symbol1_selector = '#app-shell-sidebar nav[role="navigation"]';
+    const prompt_selector = '[data-composer-markdown][contenteditable="true"]';
 
-    const legacy_message_selector =
-        '[data-message-author-role="user"], [data-message-author-role="assistant"], [data-turn="user"], [data-turn="assistant"]';
     // Match the CSS module name, not its generated build suffix.
-    const current_markdown_selector = '[class^="MarkdownRoot-"], [class*=" MarkdownRoot-"]';
-    const markdown_selector = '.markdown, ' + current_markdown_selector;
-    const user_bubble_selector = '.user-message-bubble-color, .bg-user-message';
-    const current_message_selector = '.bg-user-message, ' + current_markdown_selector;
-    const message_selector = legacy_message_selector + ', ' + current_message_selector;
+    const markdown_selector = '[class^="MarkdownRoot-"], [class*=" MarkdownRoot-"]';
+    const user_bubble_selector = '.bg-user-message';
+    const message_selector = user_bubble_selector + ', ' + markdown_selector;
     const transcript_selector = '.thread-scroll-container, [class^="transcriptContent-"], [class*=" transcriptContent-"]';
 
     const getMessageRole = function (el) {
-        const role = el.getAttribute("data-message-author-role") || el.getAttribute("data-turn");
-        if (role === "user" || role === "assistant") return role;
         if (el.matches(user_bubble_selector)) return "user";
         if (el.matches(markdown_selector) && !el.closest(user_bubble_selector + ', [class~="group/user-message"]')) return "assistant";
         return "";
@@ -134,20 +126,12 @@
         if (!main) return [];
         return Array.from($$(message_selector, main)).filter((el) => {
             if (el.closest('[contenteditable], form, [role="dialog"], aside')) return false;
-            // Keep one legacy role node even if its content already uses the new renderer.
-            if (el.matches(legacy_message_selector)) return !$(legacy_message_selector, el);
-            if (el.closest(legacy_message_selector) || !el.closest(transcript_selector)) return false;
+            if (!el.closest(transcript_selector)) return false;
             const role = getMessageRole(el);
             if (!role) return false;
             const container = role === "user" ? user_bubble_selector : markdown_selector;
             return !el.parentElement?.closest(container);
         });
-    };
-
-    const getMessageContent = function (el) {
-        const selector = getMessageRole(el) === "user" ? user_bubble_selector : markdown_selector;
-        if (el.matches(selector)) return el;
-        return $(selector, el) || (getMessageRole(el) === "user" && $(".whitespace-pre-wrap", el)) || el;
     };
 
     const syncMarkedElements = function (attribute, elements) {
@@ -165,29 +149,15 @@
         const enabled = gv("k_theme", "light") === "dark";
         document.body.classList.toggle("kdark", enabled);
         if (enabled) {
-            // Current ChatGPT uses data-theme for its color tokens; legacy builds
-            // use light/dark classes. Save only fields that this override owns.
+            // Native data-theme rules supply both page colors and color-scheme.
             if (!applyPageTheme.original) {
-                applyPageTheme.original = {
-                    theme: root.getAttribute("data-theme"),
-                    light: root.classList.contains("light"),
-                    dark: root.classList.contains("dark"),
-                    colorScheme: root.style.getPropertyValue("color-scheme"),
-                    colorSchemePriority: root.style.getPropertyPriority("color-scheme"),
-                };
+                applyPageTheme.original = { theme: root.getAttribute("data-theme") };
             }
             if (root.getAttribute("data-theme") !== "dark") root.setAttribute("data-theme", "dark");
-            if (root.classList.contains("light")) root.classList.remove("light");
-            if (!root.classList.contains("dark")) root.classList.add("dark");
-            if (root.style.getPropertyValue("color-scheme") !== "dark") root.style.setProperty("color-scheme", "dark");
         } else if (applyPageTheme.original) {
-            const original = applyPageTheme.original;
-            if (original.theme === null) root.removeAttribute("data-theme");
-            else root.setAttribute("data-theme", original.theme);
-            root.classList.toggle("light", original.light);
-            root.classList.toggle("dark", original.dark);
-            if (original.colorScheme) root.style.setProperty("color-scheme", original.colorScheme, original.colorSchemePriority);
-            else root.style.removeProperty("color-scheme");
+            const { theme } = applyPageTheme.original;
+            if (theme === null) root.removeAttribute("data-theme");
+            else root.setAttribute("data-theme", theme);
             applyPageTheme.original = null;
         }
     };
@@ -201,9 +171,7 @@
             // Include the assistant's Markdown: it can impose a separate prose limit.
             // Keep user bubbles and editor internals at their native widths.
             const seeds = getConversationMessages().map((el) => {
-                const content = getMessageContent(el);
-                const role = getMessageRole(el);
-                return role === "assistant" ? content : content.parentElement;
+                return getMessageRole(el) === "assistant" ? el : el.parentElement;
             });
             $$(prompt_selector, main).forEach((editor) => {
                 seeds.push(editor.closest("form, [data-composer-body]") || editor.parentElement);
@@ -228,10 +196,7 @@
         const keen = gv("k_keenObservation", true) === true;
         const messages = new Map();
         if (keen) getConversationMessages().forEach((el) => {
-            const role = getMessageRole(el);
-            // Role/turn wrappers may use display:contents or contain action buttons.
-            // Put the visible bubble and avatar on the actual message content instead.
-            messages.set(getMessageContent(el), role);
+            messages.set(el, getMessageRole(el));
         });
         $$("[data-kcg-message-role]").forEach((el) => {
             if (!messages.has(el)) el.removeAttribute("data-kcg-message-role");
@@ -1838,22 +1803,7 @@ body.kdark .kdialogclose {
     transform: translateY(-1px);
 }
 
-/*净化页面*/
-.kpurifypage {
-    main .text-token-text-primary .mb-5.font-medium /*游客模式的首页的LOGO下方的问候语*/,
-    form.w-full .grow .bottom-full /*游客模式的首页的快捷提示词*/,
-    ${symbol1_selector} .mb-4 /*游客模式的侧边栏的登录提醒*/,
-    main .text-token-text-primary .mx-3.items-stretch /*首页的LOGO下方的快捷提示词*/,
-    main .shadow-xxs /*输入框上方的GPT-4o上限提示、GPT-5.5 Pro升级提示*/,
-    main form .text-token-text-secondary /*输入框上方标签*/,
-    main div.text-center>span /*输入框底部标签*/,
-    main [class*="aria-live=polite"] /*上下文的选中文本的"询问ChatGPT"弹窗*/
-    {
-        display: none;
-    }
-}
-
-/*明察秋毫：兼容角色属性与新版 transcript 消息正文*/
+/*明察秋毫：直接标记 transcript 中的消息正文*/
 .kkeenobservation main [data-kcg-message-role] {
     position: relative;
     display: flow-root;
@@ -1893,7 +1843,7 @@ body.kdark .kdialogclose {
     left: 0.5rem;
     background-image: var(--keenobservation-assistant-image-url);
 }
-:is(.dark, [data-theme="dark"]) .kkeenobservation main [data-kcg-message-role="user"] {
+[data-theme="dark"] .kkeenobservation main [data-kcg-message-role="user"] {
     background: #303b50 !important;
     color: #f3f4f6;
 }
@@ -1922,10 +1872,6 @@ body.kdark .kdialogclose {
 ${symbol1_selector} {
     position: relative;
     scrollbar-width: thin;
-}
-${symbol1_selector} div.pt-3\\.5 {
-    padding-bottom: .5rem;
-    padding-top: .25rem;
 }
 
 /*选择按钮*/
@@ -2117,11 +2063,10 @@ ${symbol1_selector} .transition-all {
     const updateEverChangingFromCurrentPage = async function () {
         const conversationId = extractConversationIdFromPageUrl();
         const assistantMessages = getConversationMessages().filter((el) =>
-            (getMessageRole(el)) === "assistant",
+            getMessageRole(el) === "assistant",
         );
         const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-        const content = lastAssistantMessage && getMessageContent(lastAssistantMessage);
-        const last = `${content?.innerText || content?.textContent || ""}`
+        const last = `${lastAssistantMessage?.innerText || lastAssistantMessage?.textContent || ""}`
             .replace(/[\r\n]+/g, " ")
             .replace(/\s+/g, " ")
             .trim()
@@ -2389,10 +2334,6 @@ ${symbol1_selector} .transition-all {
             $$("[data-kcg-history-host]").forEach((el) => el.removeAttribute("data-kcg-history-host"));
             syncMarkedElements("data-kcg-history-row", []);
             $$("[data-kcg-everchanging='true']").forEach((el) => el.remove());
-            $$("[data-kcg-original-hidden='true']").forEach((el) => {
-                el.style.display = "";
-                el.removeAttribute("data-kcg-original-hidden");
-            });
         }
     };
 
@@ -2541,7 +2482,6 @@ ${symbol1_selector} .transition-all {
     克隆对话
     */
     const cloneChat = function (action) {
-        cloneChat.firstTarget = null;
         if (action === true) {
             window.addEventListener("click", cloneChat.listen_Click);
         } else {
@@ -2549,7 +2489,8 @@ ${symbol1_selector} .transition-all {
         }
     };
 
-    const setPromptRichText = function (promptTextarea, contentProseMirror) {
+    const setPromptPlainText = function (promptTextarea, text) {
+        const contentProseMirror = text.split(/\r?\n/).map((line) => `<p>${line ? htmlEncode(line) : "<br>"}</p>`).join("");
         promptTextarea.innerHTML = "";
         promptTextarea.focus();
 
@@ -2563,16 +2504,12 @@ ${symbol1_selector} .transition-all {
             selection.addRange(range);
         }
 
-        if (typeof range.createContextualFragment === "function") {
-            const fragment = range.createContextualFragment(contentProseMirror);
-            range.insertNode(fragment);
-            range.collapse(false);
-            if (selection) {
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-        } else {
-            promptTextarea.innerHTML = contentProseMirror;
+        const fragment = range.createContextualFragment(contentProseMirror);
+        range.insertNode(fragment);
+        range.collapse(false);
+        if (selection) {
+            selection.removeAllRanges();
+            selection.addRange(range);
         }
 
         promptTextarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2582,14 +2519,10 @@ ${symbol1_selector} .transition-all {
         if (gv("k_clonechat", false) !== true || !document.body.classList.contains("kkeenobservation")) return;
         const clickedElement = event.target instanceof Element
             ? event.target : document.elementFromPoint(event.clientX, event.clientY);
-        const messageElement = clickedElement?.closest('[data-kcg-message-role], ' + message_selector);
-        if (!messageElement || !messageElement.closest("main")) return;
-        const role = messageElement.getAttribute("data-kcg-message-role") || getMessageRole(messageElement);
-        if (role !== "user") return;
-        const bubble = getMessageContent(messageElement);
-        if (bubble.getAttribute("data-kcg-message-role") !== "user") return;
+        const bubble = clickedElement?.closest('[data-kcg-message-role="user"]');
+        if (!bubble || !bubble.closest("main") || !bubble.closest(transcript_selector)) return;
 
-        // The avatar belongs to the visible bubble, not necessarily the role wrapper.
+        // Hit-test the avatar on the marked message bubble.
         // Its dimensions vary with font size and browser zoom.
         const avatar = window.getComputedStyle(bubble, "::after");
         if (avatar.content === "none" || avatar.content === "normal" || avatar.display === "none") return;
@@ -2604,19 +2537,12 @@ ${symbol1_selector} .transition-all {
         if (event.clientX < logoRight - width || event.clientX > logoRight ||
             event.clientY < logoTop || event.clientY > logoTop + height) return;
 
-        const contentElement = bubble.matches(".whitespace-pre-wrap") ? bubble : $(".whitespace-pre-wrap", bubble);
+        const contentElement = $(".whitespace-pre-wrap", bubble);
         const promptTextarea = $(prompt_selector);
         if (!contentElement || !promptTextarea) return;
         // Copy message text, never its rendered bold/inline styling into the editor.
         const content = contentElement.innerText ?? contentElement.textContent;
-        if (promptTextarea instanceof HTMLTextAreaElement) {
-            promptTextarea.value = content;
-            promptTextarea.focus();
-            promptTextarea.dispatchEvent(new Event("input", { bubbles: true }));
-        } else {
-            const contentProseMirror = content.split(/\r?\n/).map((line) => `<p>${line ? htmlEncode(line) : "<br>"}</p>`).join("");
-            setPromptRichText(promptTextarea, contentProseMirror);
-        }
+        setPromptPlainText(promptTextarea, content);
     };
 
     /*
@@ -2654,15 +2580,13 @@ ${symbol1_selector} .transition-all {
     */
     const continuationButtons = new WeakSet();
     const isContinuationButton = function (button) {
-        if (!button.isConnected || button.disabled ||
+        if (!button.isConnected || !button.closest("main") || button.disabled ||
             button.getAttribute("aria-disabled") === "true" ||
-            button.closest('[hidden], [aria-hidden="true"], [data-message-author-role], ' + message_selector)) {
+            button.closest('[hidden], [aria-hidden="true"], [contenteditable], [role="dialog"], aside, ' + message_selector)) {
             return false;
         }
         const label = (button.getAttribute("aria-label") || button.textContent).trim();
-        return /^(Continue generating|继续生成|繼續生成|繼續產生|Continuar generando)$/i.test(label) ||
-            (button.closest("form.w-full .justify-center") !== null &&
-                button.querySelector('svg path[d*="M4.47189 2.5C5.02418 2.5 5.47189 2.94772 5.47189 3.5V5.07196C7.17062 3.47759 9.45672 2.5 11.9719 2.5C17.2186 2.5 21.4719 6.75329 21.4719 12C21.4719 17.2467 17.2186 21.5 11.9719 21.5C7.10259 21.5 3.09017 17.8375 2.53689 13.1164C2.47261 12.5679 2.86517"]') !== null);
+        return /^(Continue generating|继续生成|繼續生成|繼續產生|Continuar generando)$/i.test(label);
     };
 
     const speakCompletely = function () {
@@ -2696,9 +2620,7 @@ ${symbol1_selector} .transition-all {
             if (!promptTextarea) return;
 
             const result = sanitizeDataSecText(
-                "value" in promptTextarea
-                    ? promptTextarea.value
-                    : promptTextarea.innerText || promptTextarea.textContent,
+                promptTextarea.innerText || promptTextarea.textContent,
                 gv("k_datasecblocklist", datasec_blocklist_default),
             );
             if (!result.matches.join(`\n`).trim()) return;
@@ -2738,23 +2660,6 @@ ${symbol1_selector} .transition-all {
             }
         });
         return { text: result, matches: matches };
-    };
-
-    const setPromptPlainText = function (promptTextarea, text) {
-        promptTextarea.focus();
-        if ("value" in promptTextarea) {
-            promptTextarea.value = text;
-        } else {
-            const selection = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(promptTextarea);
-            selection?.removeAllRanges();
-            selection?.addRange(range);
-            if (!document.execCommand?.("insertText", false, text)) {
-                promptTextarea.textContent = text;
-            }
-        }
-        promptTextarea.dispatchEvent(new Event("input", { bubbles: true }));
     };
 
     global.__test__ = Object.assign(global.__test__ || {}, {
