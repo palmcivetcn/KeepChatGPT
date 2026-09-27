@@ -2553,45 +2553,43 @@ ${symbol1_selector} .transition-all {
     };
 
     cloneChat.listen_Click = function (event) {
-        event.stopPropagation();
-        const clickedElement = document.elementFromPoint(
-            event.clientX,
-            event.clientY,
-        );
-        if (
-            clickedElement &&
-            clickedElement.matches('main div[data-message-author-role="user"]')
-        ) {
-            // 获取该元素的边界信息
-            const rect = clickedElement.getBoundingClientRect();
+        if (gv("k_clonechat", false) !== true || !document.body.classList.contains("kkeenobservation")) return;
+        const clickedElement = event.target instanceof Element
+            ? event.target : document.elementFromPoint(event.clientX, event.clientY);
+        const messageElement = clickedElement?.closest('[data-kcg-message-role], ' + message_selector);
+        if (!messageElement || !messageElement.closest("main")) return;
+        const role = messageElement.getAttribute("data-kcg-message-role") || getMessageRole(messageElement);
+        if (role !== "user") return;
+        const bubble = getMessageContent(messageElement);
+        if (bubble.getAttribute("data-kcg-message-role") !== "user") return;
 
-            // 伪元素的宽度和高度是2rem
-            const logoWidth = 32;
-            const logoHeight = 32;
+        // The avatar belongs to the visible bubble, not necessarily the role wrapper.
+        // Its dimensions vary with font size and browser zoom.
+        const avatar = window.getComputedStyle(bubble, "::after");
+        if (avatar.content === "none" || avatar.content === "normal" || avatar.display === "none") return;
+        const width = parseFloat(avatar.width);
+        const height = parseFloat(avatar.height);
+        const right = parseFloat(avatar.right);
+        const top = parseFloat(avatar.top);
+        if (![width, height, right, top].every(Number.isFinite) || width <= 0 || height <= 0) return;
+        const rect = bubble.getBoundingClientRect();
+        const logoRight = rect.right - right;
+        const logoTop = rect.top + top;
+        if (event.clientX < logoRight - width || event.clientX > logoRight ||
+            event.clientY < logoTop || event.clientY > logoTop + height) return;
 
-            // 计算伪元素所在区域的边界
-            const logoRight = rect.right;
-            const logoLeft = rect.right - logoWidth;
-            const logoTop = rect.top;
-            const logoBottom = rect.top + logoHeight;
-
-            // 判断鼠标点击的位置是否在伪元素范围内
-            if (
-                event.clientX >= logoLeft &&
-                event.clientX <= logoRight &&
-                event.clientY >= logoTop &&
-                event.clientY <= logoBottom
-            ) {
-                const contentElement = $(".whitespace-pre-wrap", event.target);
-                const promptTextarea = $(prompt_selector);
-                if (!contentElement || !promptTextarea) return;
-                const content = contentElement.innerHTML.trim();
-                const content_ProseMirror = content
-                    .split(/\n/)
-                    .map((line) => `<p>${line}</p>`)
-                    .join("");
-                setPromptRichText(promptTextarea, content_ProseMirror);
-            }
+        const contentElement = bubble.matches(".whitespace-pre-wrap") ? bubble : $(".whitespace-pre-wrap", bubble);
+        const promptTextarea = $(prompt_selector);
+        if (!contentElement || !promptTextarea) return;
+        // Copy message text, never its rendered bold/inline styling into the editor.
+        const content = contentElement.innerText ?? contentElement.textContent;
+        if (promptTextarea instanceof HTMLTextAreaElement) {
+            promptTextarea.value = content;
+            promptTextarea.focus();
+            promptTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+        } else {
+            const contentProseMirror = content.split(/\r?\n/).map((line) => `<p>${line ? htmlEncode(line) : "<br>"}</p>`).join("");
+            setPromptRichText(promptTextarea, contentProseMirror);
         }
     };
 
@@ -2632,7 +2630,7 @@ ${symbol1_selector} .transition-all {
     const isContinuationButton = function (button) {
         if (!button.isConnected || button.disabled ||
             button.getAttribute("aria-disabled") === "true" ||
-            button.closest('[hidden], [aria-hidden="true"], [data-message-author-role]')) {
+            button.closest('[hidden], [aria-hidden="true"], [data-message-author-role], ' + message_selector)) {
             return false;
         }
         const label = (button.getAttribute("aria-label") || button.textContent).trim();
@@ -2877,10 +2875,10 @@ ${symbol1_selector} .transition-all {
         if ($(symbol1_selector) || $(symbol2_selector)) {
             if ($(symbol1_selector) && !$("#kcg")) loadKCG();
             setIfr();
-            speakCompletely();
         }
-        // Conversation rendering continues when the sidebar is collapsed or absent.
+        // Conversation rendering and continuation also run with a collapsed sidebar.
         syncPageFeatures();
+        speakCompletely();
     };
 
     const nInterval2Fun = function () {
