@@ -161,9 +161,35 @@
     };
 
     const applyPageTheme = function () {
-        // ChatGPT owns its root theme and semantic colors. The menu preference
-        // must not activate legacy dark CSS while the site still renders light.
-        document.body.classList.toggle("kdark", gv("k_theme", "light") === "dark");
+        const root = document.documentElement;
+        const enabled = gv("k_theme", "light") === "dark";
+        document.body.classList.toggle("kdark", enabled);
+        if (enabled) {
+            // Current ChatGPT uses data-theme for its color tokens; legacy builds
+            // use light/dark classes. Save only fields that this override owns.
+            if (!applyPageTheme.original) {
+                applyPageTheme.original = {
+                    theme: root.getAttribute("data-theme"),
+                    light: root.classList.contains("light"),
+                    dark: root.classList.contains("dark"),
+                    colorScheme: root.style.getPropertyValue("color-scheme"),
+                    colorSchemePriority: root.style.getPropertyPriority("color-scheme"),
+                };
+            }
+            if (root.getAttribute("data-theme") !== "dark") root.setAttribute("data-theme", "dark");
+            if (root.classList.contains("light")) root.classList.remove("light");
+            if (!root.classList.contains("dark")) root.classList.add("dark");
+            if (root.style.getPropertyValue("color-scheme") !== "dark") root.style.setProperty("color-scheme", "dark");
+        } else if (applyPageTheme.original) {
+            const original = applyPageTheme.original;
+            if (original.theme === null) root.removeAttribute("data-theme");
+            else root.setAttribute("data-theme", original.theme);
+            root.classList.toggle("light", original.light);
+            root.classList.toggle("dark", original.dark);
+            if (original.colorScheme) root.style.setProperty("color-scheme", original.colorScheme, original.colorSchemePriority);
+            else root.style.removeProperty("color-scheme");
+            applyPageTheme.original = null;
+        }
     };
 
     const applyLargeScreen = function () {
@@ -1867,7 +1893,7 @@ body.kdark .kdialogclose {
     left: 0.5rem;
     background-image: var(--keenobservation-assistant-image-url);
 }
-.dark .kkeenobservation main [data-kcg-message-role="user"] {
+:is(.dark, [data-theme="dark"]) .kkeenobservation main [data-kcg-message-role="user"] {
     background: #303b50 !important;
     color: #f3f4f6;
 }
