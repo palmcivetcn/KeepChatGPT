@@ -1866,15 +1866,24 @@ body.kdark .kdialogclose {
 /*展示大屏：正文和输入区使用相同阅读宽度与留白，保留内部控件布局*/
 @media (min-width: 1024px) {
     /* Native columns declare these variables locally, overriding inherited values. */
+    body.klargescreen main [class*="--thread-content-max-width"],
     main.largescreen [class*="--thread-content-max-width"] {
         --thread-content-max-width: 90rem !important;
+    }
+    /* A variable declaration on the home frame is not a reading column. */
+    body.klargescreen main [class~="max-w-(--thread-content-max-width)"],
+    body.klargescreen main [class~="max-w-(--thread-body-max-width)"],
+    main.largescreen [class~="max-w-(--thread-content-max-width)"],
+    main.largescreen [class~="max-w-(--thread-body-max-width)"] {
         width: 100% !important;
         max-width: min(90rem, 100%) !important;
         box-sizing: border-box;
     }
+    body.klargescreen main [class*="--thread-content-margin"],
     main.largescreen [class*="--thread-content-margin"] {
         --thread-content-margin: 1.5rem !important;
     }
+    body.klargescreen main [data-kcg-wide],
     main.largescreen [data-kcg-wide] {
         max-width: min(90rem, 100%) !important;
         min-width: 0;
