@@ -91,9 +91,18 @@
             });
         };
         const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => mutation.addedNodes.forEach(visit));
+            mutations.forEach((mutation) => {
+                if (mutation.type === "attributes") visit(mutation.target);
+                else mutation.addedNodes.forEach(visit);
+            });
         });
-        observer.observe(el, { childList: true, subtree: true });
+        observer.observe(el, {
+            childList: true,
+            subtree: true,
+            // React can promote an existing node to an editor after inserting it.
+            attributes: true,
+            attributeFilter: ["data-composer-markdown", "contenteditable"],
+        });
         visit(el);
     };
 
@@ -115,6 +124,18 @@
     const message_selector = user_bubble_selector + ', ' + markdown_selector;
     const transcript_selector = '.thread-scroll-container, [class^="transcriptContent-"], [class*=" transcriptContent-"]';
 
+    const getActiveMain = function () {
+        // ChatGPT keeps earlier workspaces mounted with display:none on an ancestor.
+        return Array.from($$("main")).find((main) => {
+            if (main.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+            for (let el = main; el; el = el.parentElement) {
+                if (window.getComputedStyle(el).display === "none") return false;
+            }
+            const visibility = window.getComputedStyle(main).visibility;
+            return visibility !== "hidden" && visibility !== "collapse";
+        }) || null;
+    };
+
     const getMessageRole = function (el) {
         if (el.matches(user_bubble_selector)) return "user";
         if (el.matches(markdown_selector) && !el.closest(user_bubble_selector + ', [class~="group/user-message"]')) return "assistant";
@@ -122,7 +143,7 @@
     };
 
     const getConversationMessages = function () {
-        const main = $("main");
+        const main = getActiveMain();
         if (!main) return [];
         return Array.from($$(message_selector, main)).filter((el) => {
             if (el.closest('[contenteditable], form, [role="dialog"], aside')) return false;
@@ -163,9 +184,11 @@
     };
 
     const applyLargeScreen = function () {
-        const main = $("main");
+        const main = getActiveMain();
         const enabled = gv("k_largescreen", false) === true;
-        main?.classList.toggle("largescreen", enabled);
+        // Keep the setting outside the conversation subtree replaced by SPA navigation.
+        document.body.classList.toggle("klargescreen", enabled);
+        $$("main").forEach((el) => el.classList.toggle("largescreen", enabled && el === main));
         const targets = new Set();
         if (main && enabled) {
             // Include the assistant's Markdown: it can impose a separate prose limit.
@@ -835,6 +858,7 @@
         if ($(".kmenu") !== null) {
             return;
         }
+        document.body.classList.remove("kmenu-open");
 
         const icon = GM_info.script.icon
             ? GM_info.script.icon
@@ -997,14 +1021,16 @@
                 `${tl("建议间隔50秒")}`,
                 `Go`,
                 function (t) {
+                    let nextInterval;
                     try {
-                        interval2Time = parseInt($(".kdialoginput", t).value);
+                        nextInterval = parseInt($(".kdialoginput", t).value);
                     } catch (e) {
-                        interval2Time = parseInt(gv("k_interval", 50));
+                        nextInterval = parseInt(gv("k_interval", 50));
                     }
-                    if (interval2Time < 10) {
+                    if (!Number.isFinite(nextInterval) || nextInterval < 10) {
                         return;
                     }
+                    interval2Time = nextInterval;
                     clearInterval(nInterval2);
                     nInterval2 = setInterval(
                         nInterval2Fun,
@@ -1286,7 +1312,12 @@
 
     const loadKCG = function () {
         let symbol_prt;
-        if ($("#kcg") !== null) {
+        document.documentElement.style.setProperty(
+            "--keenobservation-assistant-image-url",
+            `url('https://cdn.oaistatic.com/assets/favicon-180x180-od45eci6.webp')`,
+        ); //更新明察秋毫机器人头像
+        if ($("#kcg") !== null || !$(symbol1_selector)) {
+            if ($(symbol1_selector)) loadMenu();
             addStyle();
             setUserOptions();
             return;
@@ -1343,10 +1374,6 @@
             }
         });
 
-        document.documentElement.style.setProperty(
-            "--keenobservation-assistant-image-url",
-            `url('https://cdn.oaistatic.com/assets/favicon-180x180-od45eci6.webp')`,
-        ); //更新明察秋毫机器人头像
         addStyle();
         setUserOptions();
     };
@@ -2366,10 +2393,15 @@ ${symbol1_selector} .transition-all {
             return;
         }
         everChanging.observer = new MutationObserver(function (mutations) {
+            const relevantSelector = symbol1_selector + ", " + transcript_selector;
             const externalChange = mutations.some((mutation) => {
                 const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
                 if (target?.closest('[data-kcg-everchanging], #kcg, .kmenu, .kdialog')) return false;
-                return mutation.type === "characterData" ||
+                if (!target?.closest(relevantSelector) &&
+                    ![...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
+                        node.nodeType === 1 && (node.matches(relevantSelector) || node.querySelector(relevantSelector)),
+                    )) return false;
+                return mutation.type === "attributes" || mutation.type === "characterData" ||
                     [...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
                         node.nodeType !== 1 || !node.matches('[data-kcg-everchanging]'),
                     );
@@ -2384,6 +2416,8 @@ ${symbol1_selector} .transition-all {
             characterData: true,
             childList: true,
             subtree: true,
+            attributes: true,
+            attributeFilter: ["href"],
         });
     };
 
@@ -2542,7 +2576,8 @@ ${symbol1_selector} .transition-all {
         const clickedElement = event.target instanceof Element
             ? event.target : document.elementFromPoint(event.clientX, event.clientY);
         const bubble = clickedElement?.closest('[data-kcg-message-role="user"]');
-        if (!bubble || !bubble.closest("main") || !bubble.closest(transcript_selector)) return;
+        const main = getActiveMain();
+        if (!main || !bubble || bubble.closest("main") !== main || !bubble.closest(transcript_selector)) return;
 
         // Hit-test the avatar on the marked message bubble.
         // Its dimensions vary with font size and browser zoom.
@@ -2560,7 +2595,7 @@ ${symbol1_selector} .transition-all {
             event.clientY < logoTop || event.clientY > logoTop + height) return;
 
         const contentElement = $(".whitespace-pre-wrap", bubble);
-        const promptTextarea = $(prompt_selector);
+        const promptTextarea = $(prompt_selector, main);
         if (!contentElement || !promptTextarea) return;
         // Copy message text, never its rendered bold/inline styling into the editor.
         const content = contentElement.innerText ?? contentElement.textContent;
@@ -2571,7 +2606,7 @@ ${symbol1_selector} .transition-all {
     净化页面
     */
     const purifyPage = function () {
-        const main = $("main");
+        const main = getActiveMain();
         const targets = new Set();
         if (main && gv("k_cleanlyhome", false) === true) {
             const isHome = !/\/c\//.test(location.pathname) && getConversationMessages().length === 0;
@@ -2600,9 +2635,10 @@ ${symbol1_selector} .transition-all {
     /*
     言无不尽
     */
-    const continuationButtons = new WeakSet();
+    const continuationButtons = new Map();
     const isContinuationButton = function (button) {
-        if (!button.isConnected || !button.closest("main") || button.disabled ||
+        const main = getActiveMain();
+        if (!main || !button.isConnected || button.closest("main") !== main || button.disabled ||
             button.getAttribute("aria-disabled") === "true" ||
             button.closest('[hidden], [aria-hidden="true"], [contenteditable], [role="dialog"], aside, ' + message_selector)) {
             return false;
@@ -2612,15 +2648,24 @@ ${symbol1_selector} .transition-all {
     };
 
     const speakCompletely = function () {
-        if (gv("k_speakcompletely", false) !== true) return;
+        const enabled = gv("k_speakcompletely", false) === true;
+        const isCurrent = (button, state) => isContinuationButton(button) &&
+            button.closest("main") === state.main && location.pathname === state.pathname;
+        continuationButtons.forEach((state, button) => {
+            if (enabled && isCurrent(button, state)) return;
+            clearTimeout(state.timer);
+            continuationButtons.delete(button);
+        });
+        if (!enabled) return;
         const button = Array.from($$("main button")).find((candidate) =>
             !continuationButtons.has(candidate) && isContinuationButton(candidate),
         );
         if (!button) return;
-        // Capture and mark before scheduling; a rerender must not retarget the click.
-        continuationButtons.add(button);
-        setTimeout(function () {
-            if (!isContinuationButton(button) ||
+        // Reused controls start a new cycle only after leaving their previous context/state.
+        const state = { main: button.closest("main"), pathname: location.pathname };
+        continuationButtons.set(button, state);
+        state.timer = setTimeout(function () {
+            if (!isCurrent(button, state) ||
                 gv("k_speakcompletely", false) !== true) {
                 continuationButtons.delete(button);
                 return;
@@ -2637,9 +2682,13 @@ ${symbol1_selector} .transition-all {
     };
 
     dataSec.listen_input = function (event) {
-        const promptTextarea = event?.currentTarget || $(prompt_selector);
+        const main = getActiveMain();
+        const promptTextarea = event?.currentTarget || (main && $(prompt_selector, main));
+        const pathname = location.pathname;
         const scanPrompt = function () {
-            if (!promptTextarea) return;
+            if (!promptTextarea?.isConnected || !promptTextarea.matches(prompt_selector) ||
+                promptTextarea.closest("main") !== getActiveMain() ||
+                location.pathname !== pathname) return;
 
             const result = sanitizeDataSecText(
                 promptTextarea.innerText || promptTextarea.textContent,
@@ -2826,7 +2875,7 @@ ${symbol1_selector} .transition-all {
     const nInterval1Fun = function () {
         byebyeCF();
         if ($(symbol1_selector) || $(symbol2_selector)) {
-            if ($(symbol1_selector) && !$("#kcg")) loadKCG();
+            if ($(symbol1_selector) && (!$("#kcg") || !$(".kmenu"))) loadKCG();
             setIfr();
         }
         // Conversation rendering and continuation also run with a collapsed sidebar.
@@ -2835,9 +2884,7 @@ ${symbol1_selector} .transition-all {
     };
 
     const nInterval2Fun = function () {
-        if ($(symbol1_selector) || $(symbol2_selector)) {
-            keepChat();
-        }
+        keepChat();
     };
 
     /*
@@ -2879,17 +2926,18 @@ ${symbol1_selector} .transition-all {
     let nInterval1 = null;
     let nInterval2 = null;
     let interval2Time = parseInt(gv("k_interval", 50));
-    const kcgBootstrapQuietTime = 600;
+    if (!Number.isFinite(interval2Time) || interval2Time < 10) interval2Time = 50;
+    const kcgBootstrapDelay = 600;
 
     const bootKCG = function () {
         if (kcgBooted) return;
-        if (!$(symbol1_selector)) return;
-
-        kcgBooted = true;
         if (kcgBootTimer) {
             clearTimeout(kcgBootTimer);
             kcgBootTimer = null;
         }
+        if (!$(symbol1_selector) && !getActiveMain()) return;
+
+        kcgBooted = true;
         if (kcgBootstrapObserver) {
             kcgBootstrapObserver.disconnect();
             kcgBootstrapObserver = null;
@@ -2910,15 +2958,11 @@ ${symbol1_selector} .transition-all {
         if (kcgBooted) return;
 
         onDomStable(() => {
-            if (kcgBooted) return;
-            if (!$(symbol1_selector)) return;
+            if (kcgBooted || kcgBootTimer) return;
+            if (!$(symbol1_selector) && !getActiveMain()) return;
 
-            if (kcgBootTimer) {
-                clearTimeout(kcgBootTimer);
-            }
-
-            // Wait for a short DOM-quiet window instead of using a fixed startup delay.
-            kcgBootTimer = setTimeout(bootKCG, kcgBootstrapQuietTime);
+            // Streaming updates must not keep postponing startup after the shell exists.
+            kcgBootTimer = setTimeout(bootKCG, kcgBootstrapDelay);
         });
     };
 
