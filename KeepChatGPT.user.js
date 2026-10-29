@@ -563,6 +563,7 @@
     };
 
     const isTrackingRequest = function (requestUrl) {
+        if (requestUrl instanceof URL) requestUrl = requestUrl.href;
         if (typeof requestUrl !== "string" || requestUrl.trim() === "") {
             return false;
         }
@@ -2221,8 +2222,8 @@ ${symbol1_selector} .transition-all {
                 let fetchReqUrl = "";
                 let fetchReqOptions = {};
 
-                if (typeof argumentsList[0] === "string") {
-                    fetchReqUrl = argumentsList[0];
+                if (typeof argumentsList[0] === "string" || argumentsList[0] instanceof URL) {
+                    fetchReqUrl = argumentsList[0] instanceof URL ? argumentsList[0].href : argumentsList[0];
                     fetchReqOptions = argumentsList[1] || {};
                 } else if (argumentsList[0] instanceof Request) {
                     fetchReqOptions = argumentsList[0];
@@ -2784,6 +2785,10 @@ ${symbol1_selector} .transition-all {
         if (interceptTracking.observer || !document.documentElement) return;
         interceptTracking.observer = new MutationObserver((mutations) => {
             for (const mutation of mutations) {
+                if (mutation.type === "attributes") {
+                    interceptTracking.blockScript(mutation.target);
+                    continue;
+                }
                 for (const node of mutation.addedNodes) {
                     if (node.nodeType !== 1) continue;
                     if (node.tagName === "SCRIPT") {
@@ -2800,6 +2805,8 @@ ${symbol1_selector} .transition-all {
         interceptTracking.observer.observe(document.documentElement, {
             childList: true,
             subtree: true,
+            attributes: true,
+            attributeFilter: ["src"],
         });
         $$("script").forEach((scriptElement) =>
             interceptTracking.blockScript(scriptElement),
